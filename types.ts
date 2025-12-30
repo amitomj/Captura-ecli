@@ -8,7 +8,6 @@ export interface Acordao {
   data: string;
   sumario: string;
   textoIntegral: string;
-  fundamentacao: string; // Parte específica do Direito/Análise Jurídica
   adjuntos: string[];
   url: string;
   fileName?: string;

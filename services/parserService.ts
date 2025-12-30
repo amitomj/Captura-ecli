@@ -9,7 +9,7 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
 
-    // 1. ECLI
+    // 1. ECLI (Começa por ECLI:)
     const ecli = doc.querySelector('.ecli-id, .field-name-ecli')?.textContent?.trim() || 
                 Array.from(doc.querySelectorAll('h2, div, span')).find(el => el.textContent?.startsWith('ECLI:'))?.textContent?.trim() || 
                 url.split('/').filter(Boolean).pop()?.replace(/_/g, ':') || 'Desconhecido';
@@ -33,56 +33,12 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
     // 7. Texto Integral
     const textoIntegral = doc.querySelector('.field-name-texto-integral .field-item, #texto-integral')?.textContent?.trim() || doc.body?.textContent?.trim() || '';
 
-    // 8. EXTRAÇÃO DA FUNDAMENTAÇÃO DE DIREITO
-    // Procuramos marcadores comuns onde termina o relatório/factos e começa a análise jurídica
-    const keywordsDireito = [
-      /\n\s*(?:II[.\s]+)?(?:Fundamentação|FUNDAMENTAÇÃO)\s+(?:de\s+)?(?:Direito|DIREITO)\s*\n/i,
-      /\n\s*(?:III[.\s]+)?(?:Apreciação|APRECIAÇÃO)\s*\n/i,
-      /\n\s*(?:O\s+Direito|O\s+DIREITO)\s*\n/i,
-      /\n\s*(?:Questões\s+a\s+decidir|QUESTÕES\s+A\s+DECIDIR)\s*\n/i,
-      /\n\s*(?:Cumpre\s+apreciar|CUMPRE\s+APRECIAR)\s*\n/i,
-      /\n\s*(?:Fundamentação\s+Jurídica|FUNDAMENTAÇÃO\s+JURÍDICA)\s*\n/i,
-      /\n\s*(?:Enquadramento\s+jurídico|ENQUADRAMENTO\s+JURÍDICO)\s*\n/i
-    ];
-
-    let fundamentacao = "";
-    let startIndex = -1;
-
-    for (const regex of keywordsDireito) {
-      const match = textoIntegral.match(regex);
-      if (match && match.index !== undefined) {
-        startIndex = match.index;
-        break;
-      }
-    }
-
-    if (startIndex !== -1) {
-      fundamentacao = textoIntegral.substring(startIndex).trim();
-      
-      // Tentar remover a "Decisão/Dispositivo" final para não estourar tokens com formalidades
-      const decisaoKeywords = [
-        /\n\s*(?:IV[.\s]+)?(?:Decisão|DECISÃO)\s*\n/i, 
-        /\n\s*(?:Dispositivo|DISPOSITIVO)\s*\n/i,
-        /\n\s*(?:Pelo\s+exposto|PELO\s+EXPOSTO)\s*[,.]/i
-      ];
-      
-      for (const dRegex of decisaoKeywords) {
-        const dMatch = fundamentacao.match(dRegex);
-        // Garantimos que não cortamos logo no início se a keyword aparecer por acaso
-        if (dMatch && dMatch.index !== undefined && dMatch.index > 800) {
-          fundamentacao = fundamentacao.substring(0, dMatch.index).trim();
-          break;
-        }
-      }
-    } else {
-      // Fallback: Se não encontrar marcadores, salta os primeiros 6000 caracteres 
-      // (estimativa conservadora de onde acaba o relatório e factos em acórdãos médios)
-      fundamentacao = textoIntegral.length > 6000 ? textoIntegral.substring(6000) : textoIntegral;
-    }
-
-    // 9. Adjuntos
+    // 8. Adjuntos (Lógica específica: parte final do acórdão, após o relator)
     let adjuntos: string[] = [];
     const textLines = textoIntegral.split('\n').map(l => l.trim()).filter(l => l.length > 2);
+    
+    // Procurar o nome do relator no fim do texto
+    // Fix: Using a manual loop instead of findLastIndex to support older TypeScript/ES targets (ES2023-)
     let relatorIndex = -1;
     for (let i = textLines.length - 1; i >= 0; i--) {
       if (textLines[i].toLowerCase().includes(relator.toLowerCase())) {
@@ -90,7 +46,9 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
         break;
       }
     }
+    
     if (relatorIndex !== -1) {
+      // Os adjuntos normalmente vêm nas linhas imediatamente a seguir ao relator, antes das notas
       const potentialAdjuntos = textLines.slice(relatorIndex + 1, relatorIndex + 6);
       adjuntos = potentialAdjuntos
         .filter(line => !line.toLowerCase().includes('nota') && line.length < 100)
@@ -105,7 +63,6 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
       descritores,
       sumario,
       textoIntegral,
-      fundamentacao, // Novo campo preenchido
       adjuntos,
       url,
       id: ecli

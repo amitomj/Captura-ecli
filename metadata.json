@@ -1,0 +1,5 @@
+{
+  "name": "JurisAnalyzer PT - Gestão de Jurisprudência",
+  "description": "Uma aplicação avançada para advogados e juristas que permite importar acórdãos do site do CSM, extrair dados automaticamente e analisar divergências jurisprudenciais através de IA (Gemini).",
+  "requestFramePermissions": []
+}

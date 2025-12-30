@@ -1,15 +1,12 @@
 
 import { ExtractionResult, Acordao } from '../types';
 
-/**
- * Service to parse HTML content from https://jurisprudencia.csm.org.pt/
- */
 export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
 
-    // 1. ECLI (Tenta encontrar no texto ou extrair do URL se falhar)
+    // 1. ECLI
     let ecli = 'Desconhecido';
     const ecliElement = doc.querySelector('.ecli-id, .field-name-ecli, .ecli');
     if (ecliElement && ecliElement.textContent) {
@@ -20,7 +17,7 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
       else {
         const urlParts = url.split('/');
         const lastPart = urlParts.find(p => p.includes('ECLI')) || urlParts[urlParts.length - 1];
-        if (lastPart) ecli = lastPart.replace(/_/g, ':').replace(/\/$/, '');
+        if (lastPart) ecli = lastPart.replace(/_/g, ':').replace(/\/$/, '').replace(/%3A/g, ':');
       }
     }
 
@@ -46,7 +43,7 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
     // 7. Texto Integral
     const textoIntegral = doc.querySelector('.field-name-texto-integral .field-item, #texto-integral, .content')?.textContent?.trim() || doc.body.textContent?.trim() || '';
 
-    // 8. Adjuntos (Lógica de busca no final do documento)
+    // 8. Adjuntos
     let adjuntos: string[] = [];
     const lines = textoIntegral.split('\n').map(l => l.trim()).filter(l => l.length > 3);
     
@@ -59,9 +56,12 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
     }
 
     if (relatorFoundIndex !== -1) {
-      const potentialAdjuntos = lines.slice(relatorFoundIndex + 1, relatorFoundIndex + 8);
+      const potentialAdjuntos = lines.slice(relatorFoundIndex + 1, relatorFoundIndex + 10);
       adjuntos = potentialAdjuntos
-        .filter(l => l.length < 80 && l.length > 5 && !l.toLowerCase().includes('nota') && !l.toLowerCase().includes('voto'))
+        .filter(l => l.length < 80 && l.length > 5 && 
+                    !l.toLowerCase().includes('nota') && 
+                    !l.toLowerCase().includes('voto') &&
+                    !l.toLowerCase().includes('página'))
         .map(l => l.replace(/^[0-9.\s-]+/, '').trim());
     }
 
@@ -84,18 +84,34 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
   }
 };
 
+const PROXIES = [
+  (u: string) => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
+  (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+  (u: string) => `https://thingproxy.freeboard.io/fetch/${u}`
+];
+
 export const fetchAcordaoHtml = async (url: string): Promise<string> => {
-  // AllOrigins é geralmente mais estável que o corsproxy.io para sites governamentais
-  const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
-  try {
-    const response = await fetch(proxyUrl);
-    if (!response.ok) throw new Error(`Erro HTTP: ${response.status}`);
-    const data = await response.json();
-    const html = data.contents;
-    if (!html || html.length < 500) throw new Error("Conteúdo descarregado inválido ou demasiado curto.");
-    return html;
-  } catch (e) {
-    console.error("Fetch error:", e);
-    throw new Error('PROXY_FAILURE');
+  let lastError: any;
+
+  for (const proxyGen of PROXIES) {
+    try {
+      const proxyUrl = proxyGen(url);
+      const response = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
+      if (!response.ok) continue;
+
+      let html = '';
+      if (proxyUrl.includes('allorigins')) {
+        const data = await response.json();
+        html = data.contents;
+      } else {
+        html = await response.text();
+      }
+
+      if (html && html.length > 500) return html;
+    } catch (e) {
+      lastError = e;
+      continue;
+    }
   }
+  throw lastError || new Error("Todos os proxies falharam.");
 };

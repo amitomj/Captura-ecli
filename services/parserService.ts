@@ -3,38 +3,50 @@ import { ExtractionResult, Acordao } from '../types';
 
 /**
  * Service to parse HTML content from https://jurisprudencia.csm.org.pt/
- * Extraction is rule-based as requested.
  */
 export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
 
-    // Rule-based extraction based on typical CSM structure.
-    // Fix: Standard DOM querySelector does not support :contains. Replaced with Array.find.
+    // 1. ECLI (Começa por ECLI:)
     const ecli = doc.querySelector('.ecli-id, .field-name-ecli')?.textContent?.trim() || 
-                Array.from(doc.querySelectorAll('h2')).find(h => h.textContent?.includes('ECLI:'))?.textContent?.replace('ECLI:', '').trim() || 
-                url.split('/').filter(Boolean).pop() || 'Desconhecido';
+                Array.from(doc.querySelectorAll('h2, div, span')).find(el => el.textContent?.startsWith('ECLI:'))?.textContent?.trim() || 
+                url.split('/').filter(Boolean).pop()?.replace(/_/g, ':') || 'Desconhecido';
 
+    // 2. Processo
     const processo = doc.querySelector('.field-name-processo .field-item, .process-number')?.textContent?.trim() || 'Desconhecido';
+    
+    // 3. Data
     const data = doc.querySelector('.field-name-data-do-acordao .field-item, .judgment-date')?.textContent?.trim() || 'Desconhecida';
+    
+    // 4. Relator
     const relator = doc.querySelector('.field-name-relator .field-item, .judge-name')?.textContent?.trim() || 'Desconhecido';
     
+    // 5. Descritores
     const descritoresRaw = doc.querySelector('.field-name-descritores .field-items')?.textContent || '';
     const descritores = descritoresRaw.split(/[,;]/).map(d => d.trim()).filter(Boolean);
 
+    // 6. Sumário
     const sumario = doc.querySelector('.field-name-sumario .field-item, #sumario')?.innerHTML?.trim() || '';
-    const textoIntegral = doc.querySelector('.field-name-texto-integral .field-item, #texto-integral')?.innerHTML?.trim() || 
-                        doc.body.innerText; // Fallback to full text if specific div not found
+    
+    // 7. Texto Integral
+    // Fix: Using textContent instead of innerText as innerText is not available on basic Element type
+    const textoIntegral = doc.querySelector('.field-name-texto-integral .field-item, #texto-integral')?.textContent?.trim() || doc.body?.textContent || '';
 
-    // Extracting adjuncts (Adjuntos)
-    // Often found at the end of the text, look for common markers
-    const bodyText = doc.body.innerText;
+    // 8. Adjuntos (Lógica específica: parte final do acórdão, após o relator)
     let adjuntos: string[] = [];
-    const adjuntosRegex = /(?:Adjuntos:|Votantes:)\s*([^\n.]+)/i;
-    const match = bodyText.match(adjuntosRegex);
-    if (match && match[1]) {
-      adjuntos = match[1].split(/[,;e]/).map(a => a.trim()).filter(Boolean);
+    const textLines = textoIntegral.split('\n').map(l => l.trim()).filter(l => l.length > 2);
+    
+    // Procurar o nome do relator no fim do texto
+    const relatorIndex = textLines.findLastIndex(line => line.toLowerCase().includes(relator.toLowerCase()));
+    
+    if (relatorIndex !== -1) {
+      // Os adjuntos normalmente vêm nas linhas imediatamente a seguir ao relator, antes das notas
+      const potentialAdjuntos = textLines.slice(relatorIndex + 1, relatorIndex + 5);
+      adjuntos = potentialAdjuntos
+        .filter(line => !line.toLowerCase().includes('nota') && line.length < 100)
+        .map(line => line.replace(/^[0-9.\s-]+/, '').trim());
     }
 
     const dataObj: Partial<Acordao> = {
@@ -56,18 +68,12 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
   }
 };
 
-/**
- * Helper to fetch content (simulated if CORS is blocked)
- * In a real environment, this might need a proxy or the user to provide the HTML source
- */
 export const fetchAcordaoHtml = async (url: string): Promise<string> => {
   try {
     const response = await fetch(url);
     if (!response.ok) throw new Error('Falha ao aceder ao site do CSM');
     return await response.text();
   } catch (e) {
-    // If CORS fails, we can't do much from pure client side without a proxy.
-    // We inform the user to manually paste the HTML or use a browser extension.
-    throw new Error('CORS Error: O navegador bloqueou o acesso direto ao CSM. Pode ser necessário um proxy ou colar o HTML manualmente.');
+    throw new Error('CORS Error');
   }
 };

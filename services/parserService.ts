@@ -15,19 +15,17 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
     if (ecliElement && ecliElement.textContent) {
       ecli = ecliElement.textContent.trim();
     } else {
-      // Procura no corpo do texto por padrão ECLI:PT:...
       const match = html.match(/ECLI:[A-Z0-9:]+/);
       if (match) ecli = match[0];
       else {
-        // Fallback para o URL
         const urlParts = url.split('/');
-        const lastPart = urlParts[urlParts.length - 1] || urlParts[urlParts.length - 2];
-        if (lastPart && lastPart.includes('ECLI')) ecli = lastPart.replace(/_/g, ':');
+        const lastPart = urlParts.find(p => p.includes('ECLI')) || urlParts[urlParts.length - 1];
+        if (lastPart) ecli = lastPart.replace(/_/g, ':').replace(/\/$/, '');
       }
     }
 
     // 2. Processo
-    const processo = doc.querySelector('.field-name-processo .field-item, .process-number, td:contains("Processo") + td')?.textContent?.trim() || 
+    const processo = doc.querySelector('.field-name-processo .field-item, .process-number')?.textContent?.trim() || 
                     html.match(/Processo:\s*([^\s<]+)/)?.[1] || 'Desconhecido';
     
     // 3. Data
@@ -45,14 +43,13 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
     // 6. Sumário
     const sumario = doc.querySelector('.field-name-sumario .field-item, #sumario')?.textContent?.trim() || '';
     
-    // 7. Texto Integral (O conteúdo que a IA vai ler)
+    // 7. Texto Integral
     const textoIntegral = doc.querySelector('.field-name-texto-integral .field-item, #texto-integral, .content')?.textContent?.trim() || doc.body.textContent?.trim() || '';
 
     // 8. Adjuntos (Lógica de busca no final do documento)
     let adjuntos: string[] = [];
     const lines = textoIntegral.split('\n').map(l => l.trim()).filter(l => l.length > 3);
     
-    // Procurar o relator no final
     let relatorFoundIndex = -1;
     for (let i = lines.length - 1; i >= 0; i--) {
       if (lines[i].toLowerCase().includes(relator.toLowerCase())) {
@@ -62,9 +59,9 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
     }
 
     if (relatorFoundIndex !== -1) {
-      const potentialAdjuntos = lines.slice(relatorFoundIndex + 1, relatorFoundIndex + 6);
+      const potentialAdjuntos = lines.slice(relatorFoundIndex + 1, relatorFoundIndex + 8);
       adjuntos = potentialAdjuntos
-        .filter(l => l.length < 60 && !l.toLowerCase().includes('nota') && !l.toLowerCase().includes('voto'))
+        .filter(l => l.length < 80 && l.length > 5 && !l.toLowerCase().includes('nota') && !l.toLowerCase().includes('voto'))
         .map(l => l.replace(/^[0-9.\s-]+/, '').trim());
     }
 
@@ -88,16 +85,17 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
 };
 
 export const fetchAcordaoHtml = async (url: string): Promise<string> => {
-  // Utilizamos um proxy de CORS público para permitir a leitura do site CSM pelo browser
-  const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
+  // AllOrigins é geralmente mais estável que o corsproxy.io para sites governamentais
+  const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(url)}`;
   try {
     const response = await fetch(proxyUrl);
     if (!response.ok) throw new Error(`Erro HTTP: ${response.status}`);
-    const html = await response.text();
-    if (html.length < 500) throw new Error("Conteúdo descarregado é demasiado curto.");
+    const data = await response.json();
+    const html = data.contents;
+    if (!html || html.length < 500) throw new Error("Conteúdo descarregado inválido ou demasiado curto.");
     return html;
   } catch (e) {
     console.error("Fetch error:", e);
-    throw new Error('CORS_PROXY_ERROR');
+    throw new Error('PROXY_FAILURE');
   }
 };

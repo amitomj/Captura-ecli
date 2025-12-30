@@ -17,6 +17,7 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
   const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [failedUrls, setFailedUrls] = useState<string[]>([]);
 
   const refreshData = useCallback(async () => {
     if (StorageService.isReady()) {
@@ -29,7 +30,24 @@ const App: React.FC = () => {
 
   const showNotification = (msg: string) => {
     setNotification(msg);
-    setTimeout(() => setNotification(null), 3000);
+    setTimeout(() => setNotification(null), 3500);
+  };
+
+  const processManualPaste = async (url: string) => {
+    const html = prompt(`Ocorreu um erro no download automático.\nPor favor, abra o link no seu browser, copie o código-fonte (CTRL+U) ou o texto da página e cole aqui para:\n${url}`);
+    if (html && html.length > 100) {
+      const extraction = parseCsmHtml(html, url);
+      const ecli = extraction.data?.ecli || `doc_manual_${Date.now()}`;
+      const safeFileName = ecli.replace(/[:/\\?%*|"<>]/g, '_');
+      await StorageService.saveRawTxt(safeFileName, html);
+      if (extraction.success && extraction.data) {
+        await StorageService.saveProcessedAcordao(extraction.data as Acordao);
+      }
+      await refreshData();
+      showNotification("Documento guardado manualmente.");
+      return true;
+    }
+    return false;
   };
 
   const processSingleUrl = async (url: string) => {
@@ -37,25 +55,20 @@ const App: React.FC = () => {
     if (!cleanUrl.startsWith('https://jurisprudencia.csm.org.pt/')) return false;
     
     try {
-      // 1. Descarrega o HTML real usando o proxy
       const html = await fetchAcordaoHtml(cleanUrl);
-      
-      // 2. Extrai dados básicos para o nome do ficheiro
       const extraction = parseCsmHtml(html, cleanUrl);
       const ecli = extraction.data?.ecli || cleanUrl.split('/').pop() || `doc_${Date.now()}`;
       const safeFileName = ecli.replace(/[:/\\?%*|"<>]/g, '_');
 
-      // 3. Guarda o TXT integral (HTML Bruto ou Texto Limpo)
+      // Garantir que guardamos o HTML/Conteúdo e não a URL
       await StorageService.saveRawTxt(safeFileName, html);
       
-      // 4. Se a extração foi boa, já guarda também o JSON estruturado
       if (extraction.success && extraction.data) {
         await StorageService.saveProcessedAcordao(extraction.data as Acordao);
       }
-      
       return true;
     } catch (e) {
-      console.warn(`Falha no URL: ${cleanUrl}`, e);
+      console.warn(`Erro no download de ${cleanUrl}:`, e);
       return false;
     }
   };
@@ -65,22 +78,35 @@ const App: React.FC = () => {
     if (lines.length === 0) return;
     
     setIsLoading(true);
+    setFailedUrls([]);
     setProgress({ current: 0, total: lines.length });
     
     let successCount = 0;
+    const failedList: string[] = [];
+
     for (let i = 0; i < lines.length; i++) {
       setProgress(prev => ({ ...prev, current: i + 1 }));
       const ok = await processSingleUrl(lines[i]);
-      if (ok) successCount++;
-      // Pequeno delay para não sobrecarregar o proxy
-      await new Promise(r => setTimeout(r, 500));
+      if (ok) {
+        successCount++;
+      } else {
+        failedList.push(lines[i]);
+      }
+      // Delay preventivo
+      await new Promise(r => setTimeout(r, 800));
     }
     
-    setBulkUrls('');
+    setFailedUrls(failedList);
+    setBulkUrls(failedList.join('\n'));
     await refreshData();
     setIsLoading(false);
     setProgress({ current: 0, total: 0 });
-    showNotification(`${successCount} acórdãos processados com sucesso.`);
+
+    if (failedList.length > 0) {
+      setError(`Falha ao descarregar ${failedList.length} acórdãos devido a bloqueios do servidor (Timeouts). Tente novamente ou use a colagem manual.`);
+    } else {
+      showNotification(`${successCount} acórdãos processados com sucesso.`);
+    }
   };
 
   const handleSelectFolder = async () => {
@@ -90,17 +116,6 @@ const App: React.FC = () => {
       setStorageMode(result.mode);
       refreshData();
     }
-  };
-
-  const handleExportJson = () => {
-    if (acordaos.length === 0) return;
-    const blob = new Blob([JSON.stringify(acordaos, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `jurisprudencia_total_${new Date().toISOString().split('T')[0]}.json`;
-    a.click();
-    showNotification("JSON exportado.");
   };
 
   const handleSendMessage = async () => {
@@ -120,82 +135,109 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col font-sans text-slate-900">
+    <div className="min-h-screen bg-slate-100 flex flex-col font-sans text-slate-900">
       <header className="bg-slate-900 text-white p-4 shadow-xl border-b-4 border-amber-600 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto flex justify-between items-center">
           <div className="flex items-center gap-4">
             <div className="bg-amber-600 w-10 h-10 rounded-lg flex items-center justify-center font-black text-xl shadow-lg">J</div>
-            <h1 className="text-xl font-black tracking-tighter uppercase">JurisAnalyzer <span className="text-amber-500">PRO</span></h1>
+            <h1 className="text-xl font-black tracking-tighter uppercase italic">JurisAnalyzer <span className="text-amber-500 not-italic">PRO</span></h1>
           </div>
-          <div className="flex gap-4 text-xs font-bold uppercase tracking-widest text-slate-400">
-            <div>Arquivos: <span className="text-white">{rawFiles.length}</span></div>
-            <div className="border-l border-slate-700 pl-4">Estruturados: <span className="text-amber-500">{acordaos.length}</span></div>
+          <div className="flex gap-6 text-[10px] font-black uppercase tracking-widest text-slate-400">
+            <div className="flex flex-col items-end">
+              <span className="text-white text-base leading-none">{rawFiles.length}</span>
+              <span>Arquivos TXT</span>
+            </div>
+            <div className="flex flex-col items-end border-l border-slate-700 pl-6">
+              <span className="text-amber-500 text-base leading-none">{acordaos.length}</span>
+              <span>Estruturados</span>
+            </div>
           </div>
         </div>
       </header>
 
       <main className="flex-1 max-w-7xl mx-auto w-full p-6 grid grid-cols-1 lg:grid-cols-12 gap-6 h-[calc(100vh-80px)] overflow-hidden">
         
-        {/* Painel de Controlo */}
+        {/* Painel de Gestão */}
         <div className="lg:col-span-4 space-y-6 overflow-y-auto pr-2 custom-scrollbar">
           
-          <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
-            <h2 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">1. Configuração</h2>
+          <section className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
+            <h2 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">1. Repositório</h2>
             {!isFolderSelected ? (
-              <button onClick={handleSelectFolder} className="w-full bg-slate-900 text-white py-3 rounded-xl font-black text-sm hover:bg-slate-800 transition-all flex items-center justify-center gap-2">
-                <svg className="w-4 h-4 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
-                Selecionar Pasta de Destino
+              <button onClick={handleSelectFolder} className="w-full bg-slate-900 text-white py-4 rounded-2xl font-black text-sm hover:bg-slate-800 transition-all flex items-center justify-center gap-3">
+                <svg className="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" /></svg>
+                Conectar Pasta Local
               </button>
             ) : (
-              <div className="bg-green-50 p-3 rounded-xl border border-green-100 flex items-center gap-3">
-                <div className="bg-green-500 w-2 h-2 rounded-full animate-pulse"></div>
-                <span className="text-xs font-bold text-green-700 uppercase">Pasta Conectada ({storageMode})</span>
+              <div className="bg-green-50 p-4 rounded-2xl border border-green-100 flex items-center gap-4">
+                <div className="bg-green-500 w-3 h-3 rounded-full animate-pulse shadow-[0_0_10px_rgba(34,197,94,0.6)]"></div>
+                <div>
+                  <div className="text-[10px] font-black text-green-700 uppercase leading-none mb-1">Modo {storageMode}</div>
+                  <div className="text-xs font-bold text-green-900">Ligação estabelecida</div>
+                </div>
               </div>
             )}
           </section>
 
-          <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
-            <h2 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest">2. Captura do CSM</h2>
+          <section className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
+            <h2 className="text-[10px] font-black uppercase text-slate-400 mb-4 tracking-widest flex justify-between items-center">
+              2. Captura do CSM
+              {failedUrls.length > 0 && <span className="text-red-500 font-black animate-bounce">{failedUrls.length} Falhas</span>}
+            </h2>
             <textarea 
               value={bulkUrls}
               onChange={(e) => setBulkUrls(e.target.value)}
-              placeholder="Cole as URLs dos acórdãos aqui (uma por linha)..."
-              className="w-full h-40 bg-slate-50 border-2 border-slate-100 rounded-xl p-3 text-[11px] font-mono focus:border-amber-500 outline-none transition-all mb-4"
+              placeholder="Cole URLs (uma por linha)..."
+              className="w-full h-40 bg-slate-50 border-2 border-slate-100 rounded-2xl p-4 text-[11px] font-mono focus:border-amber-500 outline-none transition-all mb-4 custom-scrollbar"
               disabled={!isFolderSelected || isLoading}
             />
+            
             {progress.total > 0 && (
-              <div className="mb-4">
-                <div className="flex justify-between text-[10px] font-bold mb-1 uppercase">
-                  <span>A processar...</span>
+              <div className="mb-4 bg-slate-50 p-3 rounded-xl border border-slate-100">
+                <div className="flex justify-between text-[10px] font-black mb-2 uppercase text-slate-500">
+                  <span>A processar lote...</span>
                   <span>{progress.current} / {progress.total}</span>
                 </div>
-                <div className="w-full bg-slate-100 h-1.5 rounded-full overflow-hidden">
-                  <div className="bg-amber-500 h-full transition-all duration-300" style={{ width: `${(progress.current/progress.total)*100}%` }}></div>
+                <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
+                  <div className="bg-amber-500 h-full transition-all duration-300 shadow-[0_0_8px_rgba(245,158,11,0.5)]" style={{ width: `${(progress.current/progress.total)*100}%` }}></div>
                 </div>
               </div>
             )}
-            <button 
-              onClick={handleBulkCapture}
-              disabled={!isFolderSelected || !bulkUrls.trim() || isLoading}
-              className="w-full bg-amber-500 text-white py-3 rounded-xl font-black text-sm hover:bg-amber-600 disabled:bg-slate-200 transition-all flex items-center justify-center gap-2"
-            >
-              {isLoading ? 'A descarregar...' : 'Iniciar Captura Integral'}
-            </button>
+
+            <div className="flex gap-2">
+              <button 
+                onClick={handleBulkCapture}
+                disabled={!isFolderSelected || !bulkUrls.trim() || isLoading}
+                className="flex-1 bg-amber-500 text-white py-4 rounded-2xl font-black text-xs hover:bg-amber-600 disabled:bg-slate-200 transition-all shadow-lg shadow-amber-500/20"
+              >
+                {isLoading ? 'A descarregar...' : 'Download Integral'}
+              </button>
+              {failedUrls.length > 0 && (
+                <button 
+                  onClick={() => processManualPaste(failedUrls[0])}
+                  className="bg-indigo-600 text-white px-4 rounded-2xl font-black text-[10px] hover:bg-indigo-700"
+                  title="Colar manualmente a falha"
+                >
+                  Colar Manual
+                </button>
+              )}
+            </div>
+            <p className="text-[9px] text-slate-400 mt-3 text-center italic">Devido a timeouts no CSM, alguns links podem falhar e requerer colagem manual.</p>
           </section>
 
-          <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200">
+          <section className="bg-white p-5 rounded-3xl shadow-sm border border-slate-200">
             <div className="flex justify-between items-center mb-4">
-              <h2 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">3. Ficheiros na Pasta</h2>
-              <button onClick={handleExportJson} className="text-[10px] font-black text-indigo-600 uppercase hover:underline">Exportar Tudo</button>
+              <h2 className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Ficheiros Capturados</h2>
             </div>
-            <div className="max-h-60 overflow-y-auto space-y-2 custom-scrollbar pr-2">
+            <div className="max-h-52 overflow-y-auto space-y-2 custom-scrollbar pr-2">
               {rawFiles.length === 0 ? (
-                <div className="text-[10px] text-slate-300 italic text-center py-4">Nenhum ficheiro detetado</div>
+                <div className="text-[10px] text-slate-300 italic text-center py-6 border-2 border-dashed border-slate-50 rounded-2xl">Vazio</div>
               ) : (
                 rawFiles.map((f, i) => (
-                  <div key={i} className="flex justify-between items-center bg-slate-50 p-2 rounded-lg border border-slate-100">
-                    <span className="text-[10px] font-mono truncate max-w-[180px]">{f.name}</span>
-                    <span className="text-[9px] bg-slate-200 px-1.5 rounded font-bold uppercase">{f.content.length > 5000 ? 'HTML' : 'TXT'}</span>
+                  <div key={i} className="group flex justify-between items-center bg-slate-50 p-3 rounded-xl border border-slate-100 hover:border-amber-200 transition-colors">
+                    <span className="text-[10px] font-mono truncate max-w-[150px] font-bold text-slate-600">{f.name}</span>
+                    <span className={`text-[8px] px-2 py-0.5 rounded-full font-black uppercase ${f.content.length > 2000 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                      {f.content.length > 2000 ? 'Integral' : 'Erro'}
+                    </span>
                   </div>
                 ))
               )}
@@ -203,23 +245,36 @@ const App: React.FC = () => {
           </section>
         </div>
 
-        {/* Analista IA */}
-        <div className="lg:col-span-8 flex flex-col bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden h-full">
-          <div className="bg-slate-900 p-4 flex items-center justify-between">
-            <h2 className="text-white font-black uppercase text-xs tracking-tighter">Chatbot de Análise Jurisprudencial</h2>
-            <div className="text-[9px] text-slate-500 font-bold uppercase tracking-widest">{acordaos.length} Acórdãos Analisáveis</div>
+        {/* Chatbot Analista */}
+        <div className="lg:col-span-8 flex flex-col bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden h-full">
+          <div className="bg-slate-900 p-5 flex items-center justify-between border-b-4 border-indigo-600">
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+              </div>
+              <h2 className="text-white font-black uppercase text-xs tracking-tighter">Analista Jurídico Gemini</h2>
+            </div>
+            <div className="bg-slate-800 px-3 py-1 rounded-full text-[9px] text-slate-400 font-bold uppercase tracking-widest">
+              Contexto: <span className="text-white">{acordaos.length}</span>
+            </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/50 custom-scrollbar">
+          <div className="flex-1 overflow-y-auto p-8 space-y-8 bg-slate-50/40 custom-scrollbar">
             {messages.length === 0 ? (
-              <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto space-y-4 opacity-40">
-                <svg className="w-16 h-16 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
-                <p className="text-sm font-medium">Após capturar os acórdãos, coloque a sua questão para analisar as divergências.</p>
+              <div className="h-full flex flex-col items-center justify-center text-center max-w-sm mx-auto space-y-6 opacity-30">
+                <div className="w-20 h-20 bg-slate-200 rounded-full flex items-center justify-center">
+                  <svg className="w-10 h-10 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+                </div>
+                <p className="text-sm font-black uppercase tracking-tight">Efetue o download dos acórdãos para iniciar a análise cruzada.</p>
               </div>
             ) : (
               messages.map((msg, i) => (
                 <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[90%] p-4 rounded-2xl shadow-sm ${msg.role === 'user' ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-800'}`}>
+                  <div className={`max-w-[90%] p-6 rounded-[2rem] shadow-lg ${
+                    msg.role === 'user' 
+                      ? 'bg-slate-900 text-white rounded-tr-none' 
+                      : 'bg-white border border-slate-200 text-slate-800 rounded-tl-none border-l-8 border-indigo-600'
+                  }`}>
                     <div className="serif whitespace-pre-wrap text-sm leading-relaxed">
                       {msg.content.split('\n').map((line, idx) => {
                         const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
@@ -228,11 +283,11 @@ const App: React.FC = () => {
                         let match;
                         while ((match = linkRegex.exec(line)) !== null) {
                           parts.push(line.substring(lastIndex, match.index));
-                          parts.push(<a key={match.index} href={match[2]} target="_blank" rel="noopener noreferrer" className="text-amber-500 underline font-bold">{match[1]}</a>);
+                          parts.push(<a key={match.index} href={match[2]} target="_blank" rel="noopener noreferrer" className="text-amber-500 underline font-black hover:text-amber-600">{match[1]}</a>);
                           lastIndex = match.index + match[0].length;
                         }
                         parts.push(line.substring(lastIndex));
-                        return <div key={idx} className="mb-1">{parts.length > 0 ? parts : line}</div>;
+                        return <div key={idx} className="mb-2">{parts.length > 0 ? parts : line}</div>;
                       })}
                     </div>
                   </div>
@@ -241,30 +296,31 @@ const App: React.FC = () => {
             )}
             {isLoading && (
               <div className="flex justify-start">
-                <div className="bg-white border border-slate-200 rounded-2xl p-4 text-xs italic text-slate-400 animate-pulse">
-                  A analisar jurisprudência...
+                <div className="bg-white border border-slate-100 rounded-[2rem] rounded-tl-none p-5 text-xs font-bold text-slate-400 animate-pulse flex items-center gap-3">
+                  <div className="w-2 h-2 bg-indigo-500 rounded-full animate-bounce"></div>
+                  O Analista está a cruzar os fundamentos jurídicos...
                 </div>
               </div>
             )}
           </div>
 
-          <div className="p-4 border-t border-slate-100">
-            <div className="flex gap-2 bg-slate-100 p-1 rounded-xl">
+          <div className="p-6 bg-white border-t border-slate-100">
+            <div className="flex gap-3 bg-slate-100 p-2 rounded-2xl focus-within:bg-white focus-within:ring-4 focus-within:ring-indigo-100 transition-all">
               <input 
                 type="text" 
                 value={userInput}
                 onChange={(e) => setUserInput(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
-                placeholder="Ex: Qual a posição sobre roubo simples e lei do perdão?"
-                className="flex-1 bg-transparent border-none outline-none px-4 py-3 text-sm"
+                placeholder={acordaos.length > 0 ? "Indica a posição da jurisprudência sobre..." : "Adicione acórdãos primeiro."}
+                className="flex-1 bg-transparent border-none outline-none px-4 py-3 text-sm font-bold placeholder:text-slate-400"
                 disabled={acordaos.length === 0 || isLoading}
               />
               <button 
                 onClick={handleSendMessage}
                 disabled={isLoading || !userInput.trim() || acordaos.length === 0}
-                className="bg-slate-900 text-white px-6 rounded-lg font-bold text-xs hover:bg-slate-800 transition-all disabled:bg-slate-300"
+                className="bg-indigo-600 text-white w-12 h-12 rounded-xl flex items-center justify-center hover:bg-indigo-700 transition-all shadow-lg active:scale-95 disabled:bg-slate-300"
               >
-                Analisar
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M14 5l7 7-7 7" /></svg>
               </button>
             </div>
           </div>
@@ -272,14 +328,17 @@ const App: React.FC = () => {
       </main>
 
       {notification && (
-        <div className="fixed bottom-6 left-6 bg-slate-900 text-white px-6 py-3 rounded-xl shadow-2xl z-50 text-xs font-bold border border-amber-500 animate-in fade-in slide-in-from-left-4">
+        <div className="fixed bottom-10 left-10 bg-slate-900 text-white px-8 py-4 rounded-2xl shadow-2xl z-50 text-[10px] font-black uppercase tracking-widest border border-amber-500 animate-in fade-in slide-in-from-left-10">
           {notification}
         </div>
       )}
 
       {error && (
-        <div className="fixed top-6 right-6 bg-red-600 text-white px-6 py-3 rounded-xl shadow-2xl z-50 text-xs font-bold animate-in fade-in slide-in-from-right-4">
-          {error} <button onClick={() => setError(null)} className="ml-2 font-black">✕</button>
+        <div className="fixed top-10 right-10 bg-red-600 text-white px-8 py-5 rounded-2xl shadow-2xl z-50 text-xs font-bold animate-in fade-in slide-in-from-right-10 max-w-md">
+          <div className="flex justify-between items-start gap-4">
+            <span>{error}</span>
+            <button onClick={() => setError(null)} className="font-black text-lg leading-none hover:text-white/70">✕</button>
+          </div>
         </div>
       )}
     </div>

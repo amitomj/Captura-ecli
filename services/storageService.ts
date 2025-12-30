@@ -9,7 +9,7 @@ export class StorageService {
   private static async initDB(): Promise<IDBDatabase> {
     if (this.db) return this.db;
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open('JurisAnalyzerDB', 2);
+      const request = indexedDB.open('JurisAnalyzerDB', 3);
       request.onupgradeneeded = (event: any) => {
         const db = request.result;
         if (!db.objectStoreNames.contains('acordaos')) {
@@ -34,12 +34,9 @@ export class StorageService {
       this.isFallbackMode = false;
       return { success: true, mode: 'native' };
     } catch (err: any) {
-      if (err.name === 'SecurityError' || err.name === 'NotAllowedError' || err.message.includes('cross origin')) {
-        await this.initDB();
-        this.isFallbackMode = true;
-        return { success: true, mode: 'virtual' };
-      }
-      return { success: false, mode: 'virtual' };
+      await this.initDB();
+      this.isFallbackMode = true;
+      return { success: true, mode: 'virtual' };
     }
   }
 
@@ -47,34 +44,25 @@ export class StorageService {
     return this.rootHandle !== null || this.isFallbackMode;
   }
 
-  static getMode(): 'native' | 'virtual' {
-    return this.isFallbackMode ? 'virtual' : 'native';
-  }
-
-  // Guarda o conteúdo bruto capturado do URL
-  static async saveRawTxt(name: string, content: string, subfolder?: string): Promise<void> {
+  static async saveRawTxt(name: string, content: string): Promise<void> {
     if (this.isFallbackMode) {
       const db = await this.initDB();
       return new Promise((resolve, reject) => {
         const transaction = db.transaction('raw_files', 'readwrite');
         const store = transaction.objectStore('raw_files');
-        store.put({ name, content, subfolder, timestamp: Date.now() });
+        store.put({ name, content, timestamp: Date.now() });
         transaction.oncomplete = () => resolve();
         transaction.onerror = () => reject(transaction.error);
       });
     }
 
     if (!this.rootHandle) return;
-    let targetDir = this.rootHandle;
-    if (subfolder) targetDir = await this.rootHandle.getDirectoryHandle(subfolder, { create: true });
-    
-    const fileHandle = await targetDir.getFileHandle(`${name}.txt`, { create: true });
+    const fileHandle = await this.rootHandle.getFileHandle(`${name}.txt`, { create: true });
     const writable = await fileHandle.createWritable();
     await writable.write(content);
     await writable.close();
   }
 
-  // Lista ficheiros TXT para processamento
   static async listRawFiles(): Promise<{name: string, content: string}[]> {
     if (this.isFallbackMode) {
       const db = await this.initDB();
@@ -89,20 +77,14 @@ export class StorageService {
 
     if (!this.rootHandle) return [];
     const files: {name: string, content: string}[] = [];
-    
-    async function scan(handle: FileSystemDirectoryHandle) {
-      // @ts-ignore
-      for await (const entry of handle.values()) {
-        if (entry.kind === 'file' && entry.name.endsWith('.txt')) {
-          const file = await (entry as FileSystemFileHandle).getFile();
-          const content = await file.text();
-          files.push({ name: entry.name, content });
-        } else if (entry.kind === 'directory') {
-          await scan(entry as FileSystemDirectoryHandle);
-        }
+    // @ts-ignore
+    for await (const entry of this.rootHandle.values()) {
+      if (entry.kind === 'file' && entry.name.endsWith('.txt')) {
+        const file = await (entry as FileSystemFileHandle).getFile();
+        const content = await file.text();
+        files.push({ name: entry.name.replace('.txt', ''), content });
       }
     }
-    await scan(this.rootHandle);
     return files;
   }
 
@@ -139,21 +121,36 @@ export class StorageService {
 
     if (!this.rootHandle) return [];
     const results: Acordao[] = [];
-    async function scan(handle: FileSystemDirectoryHandle) {
-      // @ts-ignore
-      for await (const entry of handle.values()) {
-        if (entry.kind === 'file' && entry.name.endsWith('.json')) {
-          const file = await (entry as FileSystemFileHandle).getFile();
-          try {
-            const data = JSON.parse(await file.text());
-            if (data.ecli) results.push(data);
-          } catch (e) {}
-        } else if (entry.kind === 'directory') {
-          await scan(entry as FileSystemDirectoryHandle);
-        }
+    // @ts-ignore
+    for await (const entry of this.rootHandle.values()) {
+      if (entry.kind === 'file' && entry.name.endsWith('.json')) {
+        const file = await (entry as FileSystemFileHandle).getFile();
+        try {
+          const data = JSON.parse(await file.text());
+          if (data.ecli) results.push(data);
+        } catch (e) {}
       }
     }
-    await scan(this.rootHandle);
     return results;
+  }
+
+  static async deleteRawFile(name: string): Promise<void> {
+    if (this.isFallbackMode) {
+      const db = await this.initDB();
+      const transaction = db.transaction('raw_files', 'readwrite');
+      transaction.objectStore('raw_files').delete(name);
+      return;
+    }
+    await this.rootHandle?.removeEntry(`${name}.txt`);
+  }
+
+  static async downloadJson(data: any, fileName: string) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${fileName}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 }

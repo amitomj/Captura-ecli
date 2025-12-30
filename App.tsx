@@ -283,7 +283,7 @@ const App: React.FC = () => {
                {/* LADO ESQUERDO: O ACÓRDÃO PARA COPIAR */}
                <div className="flex-1 border-r border-slate-200 bg-white relative flex flex-col">
                   <div className="bg-indigo-600 text-white p-4 font-black text-[10px] uppercase tracking-[0.2em] text-center shadow-lg z-10">
-                     1. Clique abaixo -> Selecione tudo (Ctrl+A) -> Copie (Ctrl+C)
+                     1. Clique abaixo &rarr; Selecione tudo (Ctrl+A) &rarr; Copie (Ctrl+C)
                   </div>
                   <iframe src={targetUrl} className="flex-1 w-full border-none" title="Acórdão em Tratamento" />
                </div>

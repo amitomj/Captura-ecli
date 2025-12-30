@@ -1,3 +1,4 @@
+
 import { ExtractionResult, Acordao } from '../types';
 
 /**
@@ -10,7 +11,7 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
 
     // 1. ECLI (Começa por ECLI:)
     const ecli = doc.querySelector('.ecli-id, .field-name-ecli')?.textContent?.trim() || 
-                Array.from(doc.querySelectorAll('h2, div, span')).find(el => el.textContent?.startsWith('ECLI:'))?.textContent?.trim() || 
+                Array.from(doc.querySelectorAll('h2, div, span')).find(el => el.textContent?.trim().startsWith('ECLI:'))?.textContent?.trim() || 
                 url.split('/').filter(Boolean).pop()?.replace(/_/g, ':') || 'Desconhecido';
 
     // 2. Processo
@@ -30,15 +31,13 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
     const sumario = doc.querySelector('.field-name-sumario .field-item, #sumario')?.innerHTML?.trim() || '';
     
     // 7. Texto Integral
-    // Fix: Using textContent instead of innerText as innerText is not available on basic Element type
     const textoIntegral = doc.querySelector('.field-name-texto-integral .field-item, #texto-integral')?.textContent?.trim() || doc.body?.textContent || '';
 
     // 8. Adjuntos (Lógica específica: parte final do acórdão, após o relator)
     let adjuntos: string[] = [];
     const textLines = textoIntegral.split('\n').map(l => l.trim()).filter(l => l.length > 2);
     
-    // Procurar o nome do relator no fim do texto
-    // Fix for findLastIndex: Using manual backwards loop for compatibility with older ES targets
+    // Procurar o nome do relator no fim do texto (última ocorrência)
     let relatorIndex = -1;
     for (let i = textLines.length - 1; i >= 0; i--) {
       if (textLines[i].toLowerCase().includes(relator.toLowerCase())) {
@@ -48,10 +47,14 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
     }
     
     if (relatorIndex !== -1) {
-      // Os adjuntos normalmente vêm nas linhas imediatamente a seguir ao relator, antes das notas
-      const potentialAdjuntos = textLines.slice(relatorIndex + 1, relatorIndex + 5);
+      // Os adjuntos normalmente vêm nas linhas imediatamente a seguir ao relator
+      // Mas antes de referências a "notas" ou "votos"
+      const potentialAdjuntos = textLines.slice(relatorIndex + 1, relatorIndex + 10);
       adjuntos = potentialAdjuntos
-        .filter(line => !line.toLowerCase().includes('nota') && line.length < 100)
+        .filter(line => {
+          const l = line.toLowerCase();
+          return !l.includes('nota') && !l.includes('fim de documento') && l.length < 80 && l.length > 5;
+        })
         .map(line => line.replace(/^[0-9.\s-]+/, '').trim());
     }
 
@@ -76,10 +79,11 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
 
 export const fetchAcordaoHtml = async (url: string): Promise<string> => {
   try {
+    // Tentativa direta (pode falhar por CORS no browser)
     const response = await fetch(url);
     if (!response.ok) throw new Error('Falha ao aceder ao site do CSM');
     return await response.text();
   } catch (e) {
-    throw new Error('CORS Error');
+    throw new Error('CORS_ERROR');
   }
 };

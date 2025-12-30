@@ -19,6 +19,13 @@ export const parseCsmHtml = (content: string, url: string): ExtractionResult => 
     let textoIntegral = '';
     let adjuntos: string[] = [];
 
+    // Normalizar texto bruto para extração
+    const textContent = isHtml ? 
+      new DOMParser().parseFromString(content, 'text/html').body.textContent || '' : 
+      content;
+    
+    const normalizedText = textContent.replace(/\r\n/g, '\n');
+
     if (isHtml) {
       const parser = new DOMParser();
       const doc = parser.parseFromString(content, 'text/html');
@@ -36,48 +43,43 @@ export const parseCsmHtml = (content: string, url: string): ExtractionResult => 
       sumario = doc.querySelector('.field-name-sumario .field-item, #sumario')?.textContent?.trim() || '';
       textoIntegral = doc.querySelector('.field-name-texto-integral .field-item, #texto-integral')?.textContent?.trim() || doc.body?.textContent?.trim() || '';
     } else {
-      // 2. EXTRAÇÃO POR TEXTO SIMPLES (Fallback robusto para Ctrl+V)
-      // Normalizar quebras de linha
-      const text = content.replace(/\r\n/g, '\n');
-
-      // Helper para extrair via Regex
+      // 2. EXTRAÇÃO POR TEXTO SIMPLES (Ctrl+V)
       const extract = (pattern: RegExp) => {
-        const match = text.match(pattern);
+        const match = normalizedText.match(pattern);
         return match ? match[1].trim() : null;
       };
 
       ecli = extract(/ECLI:\s*(ECLI:PT:[A-Z]+:[0-9]+:[^ \n]+)/i) || 
              extract(/(ECLI:PT:[A-Z]+:[0-9]+:[^ \n]+)/i) || 'Desconhecido';
 
-      processo = extract(/(?:Processo:|N\.[ºº] do Processo:)\s*([^\n]+)/i) || 'Desconhecido';
+      processo = extract(/(?:Processo:|N\.[º°] do Processo:)\s*([^\n]+)/i) || 'Desconhecido';
       data = extract(/(?:Data do Acórdão:|Data:)\s*([^\n]+)/i) || 'Desconhecida';
       relator = extract(/Relator:\s*([^\n]+)/i) || 'Desconhecido';
       
       const descRaw = extract(/Descritores:\s*([^\n]+)/i) || '';
       descritores = descRaw.split(/[,;]/).map(d => d.trim()).filter(Boolean);
 
-      // Extração de blocos maiores (Sumário e Texto Integral)
-      const sumarioMatch = text.match(/Sumário:\s*([\s\S]*?)(?=Texto Integral:|Decisão Texto Integral:|$)/i);
+      // REGRA: Sumário surge depois de "sumário:" e vai até "Decisão Texto Parcial", "Decisão Texto Integral" ou "Texto integral"
+      const sumarioMatch = normalizedText.match(/Sumário:\s*([\s\S]*?)(?=Decisão Texto Parcial|Decisão Texto Integral|Texto integral|Texto Integral|$)/i);
       sumario = sumarioMatch ? sumarioMatch[1].trim() : '';
 
-      const textoMatch = text.match(/(?:Texto Integral:|Decisão Texto Integral:)\s*([\s\S]*)/i);
-      textoIntegral = textoMatch ? textoMatch[1].trim() : text;
+      const textoMatch = normalizedText.match(/(?:Texto Integral:|Texto integral:|Decisão Texto Integral:)\s*([\s\S]*)/i);
+      textoIntegral = textoMatch ? textoMatch[1].trim() : normalizedText;
     }
 
-    // Tentar extrair adjuntos do final do texto
-    if (relator !== 'Desconhecido') {
-      const lines = (textoIntegral || content).split('\n').map(l => l.trim()).filter(l => l.length > 2);
-      let rIndex = -1;
-      for (let i = lines.length - 1; i >= 0; i--) {
-        if (lines[i].toLowerCase().includes(relator.toLowerCase())) {
-          rIndex = i;
-          break;
-        }
-      }
-      if (rIndex !== -1) {
-        adjuntos = lines.slice(rIndex + 1, rIndex + 6)
-          .filter(l => l.length < 100 && !l.toLowerCase().includes('nota'))
-          .map(l => l.replace(/^[0-9.\s-]+/, '').trim());
+    // REGRA PARA ADJUNTOS: Estão na parte final do acórdão logo a seguir ao nome do relator (que se repete no fim)
+    if (relator !== 'Desconhecido' && relator.length > 3) {
+      // Procurar a última ocorrência do nome do relator no texto
+      const lastRelatorIndex = normalizedText.lastIndexOf(relator);
+      if (lastRelatorIndex !== -1) {
+        // Pegar o texto após o último nome do relator
+        const footer = normalizedText.substring(lastRelatorIndex + relator.length);
+        const potentialLines = footer.split('\n')
+          .map(l => l.trim())
+          .filter(l => l.length > 2 && !l.toLowerCase().includes('nota') && !l.toLowerCase().includes('http'));
+        
+        // Os primeiros nomes que aparecem costumam ser os adjuntos
+        adjuntos = potentialLines.slice(0, 5); 
       }
     }
 
@@ -85,7 +87,7 @@ export const parseCsmHtml = (content: string, url: string): ExtractionResult => 
     if (ecli === 'Desconhecido' && url) {
       const urlParts = url.split('/');
       const last = urlParts[urlParts.length - 1];
-      if (last.startsWith('ECLI')) ecli = last.replace(/_/g, ':');
+      if (last.toUpperCase().includes('ECLI')) ecli = last.replace(/_/g, ':');
     }
 
     const dataObj: Partial<Acordao> = {
@@ -98,7 +100,7 @@ export const parseCsmHtml = (content: string, url: string): ExtractionResult => 
       textoIntegral,
       adjuntos,
       url,
-      id: ecli !== 'Desconhecido' ? ecli : `proc_${processo}_${Date.now()}`
+      id: ecli !== 'Desconhecido' ? ecli : `proc_${processo.replace(/\s+/g, '')}_${Date.now()}`
     };
 
     return { success: true, data: dataObj };

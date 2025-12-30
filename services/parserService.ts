@@ -1,68 +1,100 @@
 
 import { ExtractionResult, Acordao } from '../types';
 
+/**
+ * Service to parse HTML content from https://jurisprudencia.csm.org.pt/
+ */
 export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
   try {
     const parser = new DOMParser();
     const doc = parser.parseFromString(html, 'text/html');
 
     // 1. ECLI
-    let ecli = 'Desconhecido';
-    const ecliElement = doc.querySelector('.ecli-id, .field-name-ecli, .ecli');
-    if (ecliElement && ecliElement.textContent) {
-      ecli = ecliElement.textContent.trim();
-    } else {
-      const match = html.match(/ECLI:[A-Z0-9:]+/);
-      if (match) ecli = match[0];
-      else {
-        const urlParts = url.split('/');
-        const lastPart = urlParts.find(p => p.includes('ECLI')) || urlParts[urlParts.length - 1];
-        if (lastPart) ecli = lastPart.replace(/_/g, ':').replace(/\/$/, '').replace(/%3A/g, ':');
-      }
-    }
+    const ecli = doc.querySelector('.ecli-id, .field-name-ecli')?.textContent?.trim() || 
+                Array.from(doc.querySelectorAll('h2, div, span')).find(el => el.textContent?.startsWith('ECLI:'))?.textContent?.trim() || 
+                url.split('/').filter(Boolean).pop()?.replace(/_/g, ':') || 'Desconhecido';
 
     // 2. Processo
-    const processo = doc.querySelector('.field-name-processo .field-item, .process-number')?.textContent?.trim() || 
-                    html.match(/Processo:\s*([^\s<]+)/)?.[1] || 'Desconhecido';
+    const processo = doc.querySelector('.field-name-processo .field-item, .process-number')?.textContent?.trim() || 'Desconhecido';
     
     // 3. Data
-    const data = doc.querySelector('.field-name-data-do-acordao .field-item, .judgment-date')?.textContent?.trim() || 
-                html.match(/Data do Acórdão:\s*([^\s<]+)/)?.[1] || 'Desconhecida';
+    const data = doc.querySelector('.field-name-data-do-acordao .field-item, .judgment-date')?.textContent?.trim() || 'Desconhecida';
     
     // 4. Relator
-    const relator = doc.querySelector('.field-name-relator .field-item, .judge-name')?.textContent?.trim() || 
-                   html.match(/Relator:\s*([^\n<]+)/)?.[1] || 'Desconhecido';
+    const relator = doc.querySelector('.field-name-relator .field-item, .judge-name')?.textContent?.trim() || 'Desconhecido';
     
     // 5. Descritores
     const descritoresRaw = doc.querySelector('.field-name-descritores .field-items')?.textContent || '';
-    const descritores = descritoresRaw.split(/[,;]/).map(d => d.trim()).filter(d => d.length > 2);
+    const descritores = descritoresRaw.split(/[,;]/).map(d => d.trim()).filter(Boolean);
 
     // 6. Sumário
-    const sumario = doc.querySelector('.field-name-sumario .field-item, #sumario')?.textContent?.trim() || '';
+    const sumario = doc.querySelector('.field-name-sumario .field-item, #sumario')?.innerHTML?.trim() || '';
     
     // 7. Texto Integral
-    const textoIntegral = doc.querySelector('.field-name-texto-integral .field-item, #texto-integral, .content')?.textContent?.trim() || doc.body.textContent?.trim() || '';
+    const textoIntegral = doc.querySelector('.field-name-texto-integral .field-item, #texto-integral')?.textContent?.trim() || doc.body?.textContent?.trim() || '';
 
-    // 8. Adjuntos
-    let adjuntos: string[] = [];
-    const lines = textoIntegral.split('\n').map(l => l.trim()).filter(l => l.length > 3);
-    
-    let relatorFoundIndex = -1;
-    for (let i = lines.length - 1; i >= 0; i--) {
-      if (lines[i].toLowerCase().includes(relator.toLowerCase())) {
-        relatorFoundIndex = i;
+    // 8. EXTRAÇÃO DA FUNDAMENTAÇÃO DE DIREITO
+    // Procuramos marcadores comuns onde termina o relatório/factos e começa a análise jurídica
+    const keywordsDireito = [
+      /\n\s*(?:II[.\s]+)?(?:Fundamentação|FUNDAMENTAÇÃO)\s+(?:de\s+)?(?:Direito|DIREITO)\s*\n/i,
+      /\n\s*(?:III[.\s]+)?(?:Apreciação|APRECIAÇÃO)\s*\n/i,
+      /\n\s*(?:O\s+Direito|O\s+DIREITO)\s*\n/i,
+      /\n\s*(?:Questões\s+a\s+decidir|QUESTÕES\s+A\s+DECIDIR)\s*\n/i,
+      /\n\s*(?:Cumpre\s+apreciar|CUMPRE\s+APRECIAR)\s*\n/i,
+      /\n\s*(?:Fundamentação\s+Jurídica|FUNDAMENTAÇÃO\s+JURÍDICA)\s*\n/i,
+      /\n\s*(?:Enquadramento\s+jurídico|ENQUADRAMENTO\s+JURÍDICO)\s*\n/i
+    ];
+
+    let fundamentacao = "";
+    let startIndex = -1;
+
+    for (const regex of keywordsDireito) {
+      const match = textoIntegral.match(regex);
+      if (match && match.index !== undefined) {
+        startIndex = match.index;
         break;
       }
     }
 
-    if (relatorFoundIndex !== -1) {
-      const potentialAdjuntos = lines.slice(relatorFoundIndex + 1, relatorFoundIndex + 10);
+    if (startIndex !== -1) {
+      fundamentacao = textoIntegral.substring(startIndex).trim();
+      
+      // Tentar remover a "Decisão/Dispositivo" final para não estourar tokens com formalidades
+      const decisaoKeywords = [
+        /\n\s*(?:IV[.\s]+)?(?:Decisão|DECISÃO)\s*\n/i, 
+        /\n\s*(?:Dispositivo|DISPOSITIVO)\s*\n/i,
+        /\n\s*(?:Pelo\s+exposto|PELO\s+EXPOSTO)\s*[,.]/i
+      ];
+      
+      for (const dRegex of decisaoKeywords) {
+        const dMatch = fundamentacao.match(dRegex);
+        // Garantimos que não cortamos logo no início se a keyword aparecer por acaso
+        if (dMatch && dMatch.index !== undefined && dMatch.index > 800) {
+          fundamentacao = fundamentacao.substring(0, dMatch.index).trim();
+          break;
+        }
+      }
+    } else {
+      // Fallback: Se não encontrar marcadores, salta os primeiros 6000 caracteres 
+      // (estimativa conservadora de onde acaba o relatório e factos em acórdãos médios)
+      fundamentacao = textoIntegral.length > 6000 ? textoIntegral.substring(6000) : textoIntegral;
+    }
+
+    // 9. Adjuntos
+    let adjuntos: string[] = [];
+    const textLines = textoIntegral.split('\n').map(l => l.trim()).filter(l => l.length > 2);
+    let relatorIndex = -1;
+    for (let i = textLines.length - 1; i >= 0; i--) {
+      if (textLines[i].toLowerCase().includes(relator.toLowerCase())) {
+        relatorIndex = i;
+        break;
+      }
+    }
+    if (relatorIndex !== -1) {
+      const potentialAdjuntos = textLines.slice(relatorIndex + 1, relatorIndex + 6);
       adjuntos = potentialAdjuntos
-        .filter(l => l.length < 80 && l.length > 5 && 
-                    !l.toLowerCase().includes('nota') && 
-                    !l.toLowerCase().includes('voto') &&
-                    !l.toLowerCase().includes('página'))
-        .map(l => l.replace(/^[0-9.\s-]+/, '').trim());
+        .filter(line => !line.toLowerCase().includes('nota') && line.length < 100)
+        .map(line => line.replace(/^[0-9.\s-]+/, '').trim());
     }
 
     const dataObj: Partial<Acordao> = {
@@ -73,6 +105,7 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
       descritores,
       sumario,
       textoIntegral,
+      fundamentacao, // Novo campo preenchido
       adjuntos,
       url,
       id: ecli
@@ -84,34 +117,12 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
   }
 };
 
-const PROXIES = [
-  (u: string) => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
-  (u: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
-  (u: string) => `https://thingproxy.freeboard.io/fetch/${u}`
-];
-
 export const fetchAcordaoHtml = async (url: string): Promise<string> => {
-  let lastError: any;
-
-  for (const proxyGen of PROXIES) {
-    try {
-      const proxyUrl = proxyGen(url);
-      const response = await fetch(proxyUrl, { signal: AbortSignal.timeout(8000) });
-      if (!response.ok) continue;
-
-      let html = '';
-      if (proxyUrl.includes('allorigins')) {
-        const data = await response.json();
-        html = data.contents;
-      } else {
-        html = await response.text();
-      }
-
-      if (html && html.length > 500) return html;
-    } catch (e) {
-      lastError = e;
-      continue;
-    }
+  try {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Falha ao aceder ao site do CSM');
+    return await response.text();
+  } catch (e) {
+    throw new Error('CORS Error');
   }
-  throw lastError || new Error("Todos os proxies falharam.");
 };

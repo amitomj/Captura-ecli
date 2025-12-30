@@ -1,4 +1,3 @@
-
 import { ExtractionResult, Acordao } from '../types';
 
 /**
@@ -39,7 +38,14 @@ export const parseCsmHtml = (html: string, url: string): ExtractionResult => {
     const textLines = textoIntegral.split('\n').map(l => l.trim()).filter(l => l.length > 2);
     
     // Procurar o nome do relator no fim do texto
-    const relatorIndex = textLines.findLastIndex(line => line.toLowerCase().includes(relator.toLowerCase()));
+    // Fix for findLastIndex: Using manual backwards loop for compatibility with older ES targets
+    let relatorIndex = -1;
+    for (let i = textLines.length - 1; i >= 0; i--) {
+      if (textLines[i].toLowerCase().includes(relator.toLowerCase())) {
+        relatorIndex = i;
+        break;
+      }
+    }
     
     if (relatorIndex !== -1) {
       // Os adjuntos normalmente vêm nas linhas imediatamente a seguir ao relator, antes das notas
